@@ -40,3 +40,18 @@ Os arquivos exportados ficam na pasta de execução do programa. Ao importar o C
 Esta versão mantém os registros na memória durante a execução. Ao encerrar o programa, os cadastros são reiniciados. Os arquivos TXT e CSV servem como exportações para consulta externa.
 
 O protótipo comporta até 5 produtos, 5 clientes, 10 lotes e 10 pedidos por execução. A integração com o SQL Server está planejada para salvar e recuperar os registros entre execuções.
+
+## Referências
+
+### Programação e planejamento
+
+- **Programação Estruturada em C — unidades I a IV.** Material didático da disciplina usado para estudar estruturas de controle, vetores, matrizes, funções, ponteiros e arquivos.
+- **GNU Project.** [The GNU C Reference Manual](https://www.gnu.org/software/gnu-c-manual/gnu-c-manual.html), versão 0.2.5. Referência para estruturas de controle, vetores, matrizes e funções.
+- **GNU Project.** [The GNU C Library Reference Manual](https://www.gnu.org/s/libc/manual/pdf/libc.pdf), capítulo *Input/Output on Streams*. Referência para `fopen`, `fprintf` e `fclose`, usadas nas exportações.
+- **PARNAS, David Lorge.** [On the Criteria to Be Used in Decomposing Systems into Modules](https://prl.khoury.northeastern.edu/img/p-tr-1971.pdf). Relatório técnico, Carnegie Mellon University, 1971. Leitura sobre a divisão de responsabilidades no código.
+- **SCHWABER, Ken; SUTHERLAND, Jeff.** [The Scrum Guide](https://scrumguides.org/scrum-guide.html), 2020. Referência para o planejamento ágil do PIM IV.
+
+### Leituras para a integração com o banco
+
+- **MICROSOFT.** [Desenvolver aplicações em C e C++ com o driver ODBC](https://learn.microsoft.com/pt-br/sql/connect/odbc/develop-cpp-applications?view=sql-server-ver17). Documentação para conectar o programa em C ao SQL Server.
+- **HAERDER, Theo; REUTER, Andreas.** [Principles of Transaction-Oriented Database Recovery](https://doi.org/10.1145/289.291). *ACM Computing Surveys*, v. 15, n. 4, p. 287–317, 1983. Referência para planejar o registro do pedido e a baixa do estoque na mesma transação.
