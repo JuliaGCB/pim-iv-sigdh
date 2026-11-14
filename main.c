@@ -1,16 +1,126 @@
 #include <stdio.h>
 #include <locale.h>
+#include <windows.h>
+#include <sql.h>
+#include <sqlext.h>
 
-// Retorna a posição do produto ou -1 se o código não existir.
-int buscarProduto(int codigos[], int quantidadeProdutos, int codigoBuscado)
+// Envia os valores digitados separadamente do SQL, na ordem dos sinais ?.
+static int executarSQL(const char *sql, char *valores[], int total,
+                       const char *colunas[], int quantidadeColunas, FILE *arquivo)
 {
-    for (int i = 0; i < quantidadeProdutos; i++) {
-        if (codigos[i] == codigoBuscado) {
-            return i;
-        }
+    SQLCHAR configuracao[] =
+        "Driver={ODBC Driver 18 for SQL Server};"
+        "Server=localhost\\SQLEXPRESS;Database=SIGDH;"
+        "Trusted_Connection=yes;Encrypt=yes;TrustServerCertificate=yes;";
+    SQLHENV ambiente = SQL_NULL_HENV;
+    SQLHDBC conexao = SQL_NULL_HDBC;
+    SQLHSTMT consulta = SQL_NULL_HSTMT;
+    SQLLEN tamanhos[4];
+    int conectado = 0, sucesso = 0, linhas = 0;
+    SQLSMALLINT tipoErro = SQL_HANDLE_ENV;
+    SQLHANDLE origemErro = SQL_NULL_HANDLE;
+
+    if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &ambiente)))
+        goto finalizar;
+    origemErro = ambiente;
+    if (!SQL_SUCCEEDED(SQLSetEnvAttr(ambiente, SQL_ATTR_ODBC_VERSION, (SQLPOINTER)SQL_OV_ODBC3, 0)) ||
+        !SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_DBC, ambiente, &conexao)))
+        goto finalizar;
+
+    tipoErro = SQL_HANDLE_DBC;
+    origemErro = conexao;
+    SQLSetConnectAttr(conexao, SQL_LOGIN_TIMEOUT, (SQLPOINTER)5, 0);
+    if (!SQL_SUCCEEDED(SQLDriverConnectA(conexao, NULL, configuracao, SQL_NTS,
+                                         NULL, 0, NULL, SQL_DRIVER_NOPROMPT)))
+        goto finalizar;
+    conectado = 1;
+
+    if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, conexao, &consulta)))
+        goto finalizar;
+    tipoErro = SQL_HANDLE_STMT;
+    origemErro = consulta;
+
+    for (int i = 0; i < total; i++) {
+        tamanhos[i] = SQL_NTS;
+        if (!SQL_SUCCEEDED(SQLBindParameter(consulta, i + 1, SQL_PARAM_INPUT,
+                                            SQL_C_CHAR, SQL_WVARCHAR, 59, 0,
+                                            valores[i], 0, &tamanhos[i])))
+            goto finalizar;
     }
 
-    return -1;
+    if (!SQL_SUCCEEDED(SQLExecDirectA(consulta, (SQLCHAR *)sql, SQL_NTS)))
+        goto finalizar;
+
+    if (quantidadeColunas > 0) {
+        SQLRETURN resultado;
+        while (SQL_SUCCEEDED(resultado = SQLFetch(consulta))) {
+            linhas++;
+            for (int i = 0; i < quantidadeColunas; i++) {
+                char valor[256];
+                SQLLEN tamanho;
+                if (arquivo != NULL && quantidadeColunas == 6) {
+                    // Le o texto Unicode do banco e converte para UTF-8 no CSV.
+                    SQLWCHAR texto[256];
+                    if (SQLGetData(consulta, i + 1, SQL_C_WCHAR, texto,
+                                   sizeof texto, &tamanho) != SQL_SUCCESS ||
+                        WideCharToMultiByte(CP_UTF8, 0, (const WCHAR *)texto, -1,
+                                            valor, sizeof valor, NULL, NULL) == 0)
+                        goto finalizar;
+                } else if (!SQL_SUCCEEDED(SQLGetData(consulta, i + 1, SQL_C_CHAR, valor,
+                                                     sizeof valor, &tamanho))) {
+                    goto finalizar;
+                }
+                if (arquivo == NULL) {
+                    printf("%s: %s\n", colunas[i], valor);
+                } else if (quantidadeColunas == 2) {
+                    if (i > 0) fputs(" - ", arquivo);
+                    fputs(valor, arquivo);
+                } else {
+                    if (i > 0) fputc(';', arquivo);
+                    fputc('"', arquivo);
+                    if (valor[0] && (valor[0] == '=' || valor[0] == '+' ||
+                                     valor[0] == '-' || valor[0] == '@'))
+                        fputc('\'', arquivo);
+                    for (int j = 0; valor[j]; j++) {
+                        if (valor[j] == '"') fputc('"', arquivo);
+                        fputc(valor[j], arquivo);
+                    }
+                    fputc('"', arquivo);
+                }
+            }
+            fputc('\n', arquivo == NULL ? stdout : arquivo);
+        }
+        if (resultado != SQL_NO_DATA) goto finalizar;
+        if (linhas == 0 && arquivo == NULL) puts("Nenhum registro encontrado.");
+    }
+    sucesso = 1;
+
+finalizar:
+    if (!sucesso) {
+        SQLCHAR estado[6], mensagem[512];
+        puts("O SQL Server nao concluiu a operacao.");
+        if (origemErro != SQL_NULL_HANDLE &&
+            SQL_SUCCEEDED(SQLGetDiagRecA(tipoErro, origemErro, 1, estado, NULL,
+                                         mensagem, sizeof mensagem, NULL)))
+            printf("%s: %s\n", (char *)estado, (char *)mensagem);
+    }
+    if (consulta != SQL_NULL_HSTMT) SQLFreeHandle(SQL_HANDLE_STMT, consulta);
+    if (conectado) SQLDisconnect(conexao);
+    if (conexao != SQL_NULL_HDBC) SQLFreeHandle(SQL_HANDLE_DBC, conexao);
+    if (ambiente != SQL_NULL_HENV) SQLFreeHandle(SQL_HANDLE_ENV, ambiente);
+    return sucesso;
+}
+
+static int lerInteiro(const char *pergunta, int *valor)
+{
+    printf("%s", pergunta);
+    if (scanf("%d", valor) == 1) return 1;
+    puts("Digite um numero inteiro.");
+    int caractere;
+    do {
+        caractere = getchar();
+    } while (caractere != '\n' && caractere != EOF);
+    return 0;
 }
 
 //retorna 1 se a data existe no calendário, ou 0 se for inválido
@@ -76,45 +186,22 @@ int lerData(void)
     return data;
 }
 
-void mostrarData(int data)
-{
-    int ano = data / 10000;
-    int mes = (data / 100) % 100;
-    int dia = data % 100;
-
-    printf("%02d/%02d/%04d\n", dia, mes, ano);
-}
-
 int main(void)
 {
     setlocale(LC_ALL, "Portuguese");
 
     int opcao;
-    int codigos[5];
-    char nomes[5][60];
-
-    // Também indica a próxima posição livre nos vetores.
-    int quantidadeProdutos = 0;
-
-    //Lotes dos produtos
-    int codigosProdutosDosLotes[10];
-    int saldosDosLotes[10];
-    int quantidadeLotes = 0;
-    char numerosLotes[10][30];
-    int validadesDosLotes[10];
-
-    //Cadastro dos clientes
-    int codigosClientes[5];
-    char nomesClientes[5][60];
-    int quantidadeClientes = 0;
-
-    // Registro dos pedidos
-    // O mesmo índice liga o cliente, o lote, a quantidade e a data de cada pedido.
-    int clientesDosPedidos[10];
-    int lotesDosPedidos[10];
-    int quantidadesDosPedidos[10];
-    int datasDosPedidos[10];
-    int quantidadePedidos = 0;
+    const char *produtos[] = {"Codigo do produto", "Nome"};
+    const char *clientes[] = {"Codigo do cliente", "Nome"};
+    const char *lotes[] = {"Lote interno", "Codigo do produto", "Lote do fabricante",
+                           "Validade", "Saldo"};
+    const char *pedidos[] = {"Pedido", "Codigo do cliente", "Nome do cliente",
+                             "Lote", "Quantidade", "Data"};
+    const char *sqlProdutos = "SELECT Codigo, Nome FROM dbo.Produto ORDER BY Codigo";
+    const char *sqlPedidos =
+        "SELECT p.IdPedido, p.CodigoCliente, c.Nome, p.IdLote, p.Quantidade, "
+        "CONVERT(char(10), p.DataPedido, 103) FROM dbo.Pedido p "
+        "JOIN dbo.Cliente c ON c.Codigo = p.CodigoCliente ORDER BY p.IdPedido";
 
     do {
         printf("\n========================================\n");
@@ -131,6 +218,7 @@ int main(void)
         printf("9- Registrar pedido\n");
         printf("10- Consultar pedidos\n");
         printf("11- Exportar pedidos para planilha\n");
+        printf("12- Testar conexao com o SQL Server\n");
         printf("0- Sair\n\n");
 
         printf("Digite uma opção: ");
@@ -144,476 +232,132 @@ int main(void)
 
         switch (opcao) {
             case 1:
-                printf("Cadastro de produto selecionado.\n\n");
-
-                if (quantidadeProdutos == 5) {
-                    printf("Cadastro cheio. Limite de 5 produtos.\n");
-                    break;
-                }
-
-                printf("Informe o código do produto: ");
-
-                if (scanf("%d", &codigos[quantidadeProdutos]) == 1) {
-                    if (buscarProduto(codigos, quantidadeProdutos,
-                                      codigos[quantidadeProdutos]) != -1) {
-                        printf("Esse código já está cadastrado.\n");
-                        break; // Sai do switch e volta ao menu.
-                    }
-
-                    printf("Informe o nome do produto: ");
-
-                    // Lê até 59 caracteres e aceita espaços entre palavras.
-                    if (scanf(" %59[^\n]", nomes[quantidadeProdutos]) == 1) {
-                        quantidadeProdutos++;
-                        printf("Produto cadastrado.\n");
-                    }
-                } else {
-                        printf("Código inválido. Digite um número inteiro.\n");
-
-                        // Descarta o que foi digitado até o Enter ou o fim da entrada.
-                        int caractere;
-                        do {
-                            caractere = getchar();
-                        } while (caractere != '\n' && caractere != EOF);
-                    }
-
+            case 7: {
+                int codigo;
+                char codigoTexto[16], nome[60];
+                if (!lerInteiro("Informe o codigo: ", &codigo)) break;
+                printf("Informe o nome: ");
+                if (scanf(" %59[^\n]", nome) != 1) break;
+                snprintf(codigoTexto, sizeof codigoTexto, "%d", codigo);
+                char *valores[] = {codigoTexto, nome};
+                const char *sql = opcao == 1
+                    ? "INSERT INTO dbo.Produto (Codigo, Nome) VALUES (?, ?)"
+                    : "INSERT INTO dbo.Cliente (Codigo, Nome) VALUES (?, ?)";
+                if (executarSQL(sql, valores, 2, NULL, 0, NULL))
+                    puts(opcao == 1 ? "Produto cadastrado." : "Cliente cadastrado.");
                 break;
+            }
 
             case 2:
-                printf("Consulta de produtos\n\n");
-
-                if (quantidadeProdutos == 0) {
-                    printf("Nenhum produto cadastrado.\n");
-                } else {
-                    // O mesmo índice liga o código ao nome do produto.
-                    for (int i = 0; i < quantidadeProdutos; i++) {
-                        printf("Código do produto: %d\n", codigos[i]);
-                        printf("Nome do produto: %s\n\n", nomes[i]);
-                    }
-                }
+                executarSQL(sqlProdutos, NULL, 0, produtos, 2, NULL);
                 break;
 
             case 3:
-                printf("Exportar lista de produtos.\n\n");
-                 {
-                if(quantidadeProdutos == 0){
-                    printf("Nenhum produto para exportar.\n");
+            case 11: {
+                const char *nomeArquivo = opcao == 3 ? "produtos.txt" : "pedidos.csv";
+                FILE *arquivo = fopen(nomeArquivo, "w");
+                if (arquivo == NULL) {
+                    puts("Nao foi possivel abrir o arquivo.");
                     break;
                 }
-
-                // "w" cria o arquivo ou substitui o conteúdo da exportação anterior.
-                FILE *arquivo = fopen("produtos.txt", "w");
-
-                if(arquivo == NULL){
-                    printf("Não foi possível abrir o arquivo.\n");
-                    break;
+                int ok;
+                if (opcao == 3) {
+                    ok = executarSQL(sqlProdutos, NULL, 0, produtos, 2, arquivo);
+                } else {
+                    // O BOM ajuda o editor de planilhas a reconhecer UTF-8.
+                    fputs("\xEF\xBB\xBF", arquivo);
+                    fputs("Pedido;Codigo do cliente;Nome do cliente;Lote;Quantidade;Data\n", arquivo);
+                    ok = executarSQL(sqlPedidos, NULL, 0, pedidos, 6, arquivo);
                 }
-
-                int gravacaoOK = 1;
-
-                for(int i = 0; i < quantidadeProdutos; i++){
-                    if(fprintf(arquivo, "%d - %s\n", codigos [i], nomes[i]) < 0){
-                        gravacaoOK = 0;
-                        break;
-                    }
-                }
-
-                // Fecha o arquivo e verifica se os dados foram gravados.
-
-                if(fclose(arquivo) != 0){
-                    gravacaoOK = 0;
-                }
-
-                if(gravacaoOK == 1){
-                    printf("Lista exportada para produtos.txt.\n");
-                } else{
-                    printf("Erro ao gravar a lista de produtos.\n");
-                }
-
+                if (ferror(arquivo)) ok = 0;
+                if (fclose(arquivo) != 0) ok = 0;
+                if (ok) printf("Arquivo exportado: %s\n", nomeArquivo);
+                else puts("A exportacao falhou.");
                 break;
             }
 
-            case 4:
-                printf("Consultar produto por código.\n\n");
-                {
-                int codigoBuscado;
-
-                printf("Informe o código do produto: ");
-                if (scanf("%d", &codigoBuscado) != 1){
-                    printf("Código invãlido. Digite um número inteiro.\n");
-
-                    int caractere;
-                    do{
-                        caractere = getchar();
-                    }while(caractere != '\n' && caractere != EOF);
-                    break;
-                }
-
-                int posicao = buscarProduto(codigos, quantidadeProdutos, codigoBuscado);
-
-                if(posicao == -1){
-                    printf("Produto não encontrado.\n");
-                }else{
-                    printf("código do produto: %d\n", codigos[posicao]);
-                    printf("Nome do produto: %s\n", nomes[posicao]);
-                }
-
-
-
-            break;
+            case 4: {
+                int codigo;
+                char codigoTexto[16];
+                if (!lerInteiro("Informe o codigo do produto: ", &codigo)) break;
+                snprintf(codigoTexto, sizeof codigoTexto, "%d", codigo);
+                char *valores[] = {codigoTexto};
+                executarSQL("SELECT Codigo, Nome FROM dbo.Produto WHERE Codigo = ?",
+                            valores, 1, produtos, 2, NULL);
+                break;
             }
 
-            case 5:
-                printf("Registrar entrada de estoque.\n\n");
-
-                {
-                if(quantidadeLotes == 10){
-                    printf("Limite de lotes atingido.\n");
+            case 5: {
+                int codigo, quantidade;
+                char codigoTexto[16], quantidadeTexto[16], validadeTexto[16], numeroLote[30];
+                if (!lerInteiro("Informe o codigo do produto: ", &codigo) ||
+                    !lerInteiro("Informe a quantidade recebida: ", &quantidade)) break;
+                if (quantidade <= 0) {
+                    puts("A quantidade deve ser maior que zero.");
                     break;
                 }
-
-                int codigoProduto;
-                int quantidadeRecebida;
-
-                printf("Informe o código do produto: ");
-                if(scanf("%d", &codigoProduto) != 1){ //Verificação
-                    printf("O código precisa ser um número inteiro. \n");
-                    int caractere;
-                    do{
-                        caractere = getchar(); //limpam a entrada caso a pessoa digite texto onde o programa espera um número.
-                    }while(caractere != '\n' && caractere != EOF);//"continue lendo enquanto ainda não chegou ao Enter e ainda há entrada para ler"
-                    break;
-                }
-
-                //Só cria o lote se o produto existir no cadastro.
-                if (buscarProduto(codigos, quantidadeProdutos, codigoProduto) == -1){
-                    printf("Produto não encontrado.\n");
-                    break;
-                }
-
-                printf("Informe a quantidade recebida: ");
-                if(scanf("%d", &quantidadeRecebida) != 1){
-                    printf("A quantidade precisa ser um número inteiro.\n");
-                    int caractere;
-                    do{
-                        caractere = getchar(); // limpam a entrada caso a pessoa digite texto onde o programa espera um número.
-                    }while(caractere != '\n' && caractere !=EOF); //"continue lendo enquanto ainda não chegou ao Enter e ainda há entrada para ler"
-                    break;
-                }
-
-                if(quantidadeRecebida <= 0){
-                    printf("A quantidade deve ser maior que zero.\n");
-                    break;
-                }
-
-                printf("Informe o número do lote do fabricante: "); //Numero do fabricante
-
-                if(scanf("%29s", numerosLotes[quantidadeLotes]) != 1){
-                    printf("Não foi possível ler o número do lote.\n");
-                    break;
-                }
-
+                printf("Informe o numero do lote do fabricante: ");
+                if (scanf("%29s", numeroLote) != 1) break;
                 printf("Informe a validade (DDMMAAAA): ");
                 int validade = lerData();
-
                 if (validade == 0) {
-                    printf("Validade inválida. Digite oito dígitos, como 08012027.\n");
+                    puts("Validade invalida. Informe oito digitos, como 12122027.");
                     break;
                 }
-
-                validadesDosLotes[quantidadeLotes] = validade;
-
-                //Guarda os dois dados na mesma posição e conta o novo lote.
-                codigosProdutosDosLotes[quantidadeLotes] = codigoProduto;
-                saldosDosLotes[quantidadeLotes] = quantidadeRecebida;
-                quantidadeLotes++;
-
-                printf("Lote interno %d registrado com %d unidades.\n",
-                       quantidadeLotes, quantidadeRecebida);
-
+                snprintf(codigoTexto, sizeof codigoTexto, "%d", codigo);
+                snprintf(quantidadeTexto, sizeof quantidadeTexto, "%d", quantidade);
+                snprintf(validadeTexto, sizeof validadeTexto, "%08d", validade);
+                char *valores[] = {codigoTexto, numeroLote, validadeTexto, quantidadeTexto};
+                // A chave estrangeira exige que o produto exista no banco.
+                if (executarSQL("INSERT INTO dbo.Lote (CodigoProduto, NumeroFabricante, Validade, Saldo) "
+                                "OUTPUT INSERTED.IdLote VALUES (?, ?, CONVERT(date, ?, 112), ?)",
+                                valores, 4, lotes, 1, NULL))
+                    puts("Entrada registrada no SQL Server.");
                 break;
             }
 
             case 6:
-                printf("Estoque por lote\n\n");
-
-                if(quantidadeLotes == 0){
-                    printf("Nenhum lote registrado.\n");
-                    break;
-                }
-
-                for(int i = 0; i < quantidadeLotes; i++){
-                    printf("Lote interno: %d\n", i + 1);
-                    printf("Lote do fabricante: %s\n", numerosLotes[i]);
-                    printf("Validade: ");
-                    mostrarData(validadesDosLotes[i]);
-                    printf("Código do produto: %d\n", codigosProdutosDosLotes[i]);
-                    printf("Saldo: %d unidades\n\n", saldosDosLotes[i]);
-                }
-
+                executarSQL("SELECT IdLote, CodigoProduto, NumeroFabricante, "
+                            "CONVERT(char(10), Validade, 103), Saldo FROM dbo.Lote ORDER BY IdLote",
+                            NULL, 0, lotes, 5, NULL);
                 break;
-
-            case 7:
-                printf("Cadastro de clientes.\n\n");
-                {
-            if(quantidadeClientes == 5){
-                printf("Cadastro cheio. Limite de 5 clientes.\n");
-                break;
-            }
-
-            int codigoCliente;
-
-            printf("Informe o código do cliente: ");
-            if(scanf("%d", &codigoCliente) != 1){
-                printf("Código Inválido. Digite um número inteiro.\n");
-
-                int caractere;
-
-                do{
-                    caractere = getchar();
-                }while(caractere != '\n' && caractere != EOF);
-                break;
-            }
-
-            if(buscarProduto(codigosClientes, quantidadeClientes, codigoCliente) != -1){
-                printf("Esse código da cliente já está cadastrado.\n");
-                break;
-            }
-
-             printf("Informe o nome ou a razão social do cliente: ");
-             if(scanf(" %59[^\n]", nomesClientes[quantidadeClientes]) == 1){
-                codigosClientes[quantidadeClientes] = codigoCliente;
-                quantidadeClientes++;
-                printf("Cliente Cadastrado.\n");
-             }
-            break;
-            }
 
             case 8:
-                printf("Consulta de clientes.\n\n");
-
-                if(quantidadeClientes == 0){
-                    printf("Nenhum cliente cadastrado");
-                    break;
-                }
-
-                for(int i = 0; i < quantidadeClientes; i++){
-                    printf("Código do cliente: %d\n", codigosClientes[i]);
-                    printf("Nome do cliente: %s\n", nomesClientes[i]);
-                    printf("\n");
-                }
-
+                executarSQL("SELECT Codigo, Nome FROM dbo.Cliente ORDER BY Codigo",
+                            NULL, 0, clientes, 2, NULL);
                 break;
 
-            case 9:
-                printf("Registrar pedidos.\n\n");
-
-                {
-                    if(quantidadePedidos == 10){
-                        printf("Limite de 10 pedidos atingido.\n");
-                        break;
-                    }
-
-                    if(quantidadeClientes == 0 || quantidadeLotes == 0){
-                        printf("Cadastre pelo menos um cliente e um lote antes do pedido.\n");
-                        break;
-                    }
-                    int codigoCliente;
-                    int numeroLote;
-
-                    printf("Informe o código do cliente:");
-                    if(scanf("%d", &codigoCliente) != 1 ){
-                        printf("Código Inválido. Digite um número inteiro.\n");
-                        int caractere;
-
-                        do{
-                            caractere = getchar();
-                        }while(caractere != '\n' && caractere != EOF);
-                        break;
-                    }
-
-                    int posicaoCliente = buscarProduto(codigosClientes, quantidadeClientes, codigoCliente);
-
-                    if(posicaoCliente == -1){
-                        printf("Cliente não encontrado.\n");
-                        break;
-                    }
-
-                    printf("Informe o número interno do lote: ");
-                    if(scanf("%d", &numeroLote) != 1){
-                        printf("Numero de lote inválido. Digite um número inteiro.\n");
-                        int caractere;
-
-                        do{
-                            caractere = getchar();
-                        }while(caractere != '\n' && caractere != EOF);
-                        break;
-                    }
-
-                    if(numeroLote < 1 || numeroLote > quantidadeLotes){
-                        printf("Lote não encontrado");
-                        break;
-                    }
-
-                    int posicaoLote = numeroLote -1;
-
-                    //Verificar se a data de validade está dentro do prazo
-                    printf("Informe a data do pedido (DDMMAAAA): ");
-                    int dataPedido = lerData();
-
-                    if (dataPedido == 0) {
-                        printf("Data do pedido inválida. Digite oito dígitos, como 08112026.\n");
-                        break;
-                    }
-
-                    //Compara a validade do lote com a data informada no pedido.
-                    if(validadesDosLotes[posicaoLote] < dataPedido){
-                        printf("Esse lote está vencido na data do pedido");
-                        break;
-                    }
-
-                    printf("Cliente selecionado: %s\n", nomesClientes[posicaoCliente]);
-                    printf("Lote selecionado: %s\n", numerosLotes[posicaoLote]);
-                    printf("Saldo disponível: %d unidades\n", saldosDosLotes[posicaoLote]);
-
-                    //Quantidade do Pedido
-                    int quantidadePedida;
-
-                    //scanf retorna 1 quando consegue ler um número inteiro.
-                    printf("Informe a quantidade do pedido: ");
-                    if(scanf("%d", &quantidadePedida) != 1){
-                        printf("A quantidade precisa ser um número inteiro.\n");
-
-                        //Descarta a entrada inválida até o Enter ou o fim da entrada
-                        int caractere;
-                        do{
-                            caractere = getchar();
-                        }while(caractere != '\n' && caractere != EOF);
-                        break; //Sai do case 9 e volta o menu
-                    }
-
-                    //Um pedido precisa ter pelo menos uma unidade
-                    if(quantidadePedida <= 0){
-                        printf("A quantidade deve ser maior que zero.\n");
-                        break;
-                    }
-
-                    //posicaoLote indica qual Lote foi escolhido
-                    //Usamos essa posição para consultar o saldo daquele lote.
-                    if(quantidadePedida > saldosDosLotes[posicaoLote]){
-                        printf("Estoque insuficiente para esse pedido.\n");
-                        break;
-                    }
-
-                    //Guarda todos os dados na próxima posição livre.
-                    clientesDosPedidos[quantidadePedidos] = codigoCliente;
-                    lotesDosPedidos[quantidadePedidos] = numeroLote;
-                    quantidadesDosPedidos[quantidadePedidos] = quantidadePedida;
-                    datasDosPedidos[quantidadePedidos ] = dataPedido;
-
-                    //Desconta a quantidade somente do lote escolhido.
-                    saldosDosLotes[posicaoLote] -= quantidadePedida;
-
-                    quantidadePedidos++;
-
-                    printf("Pedido %d registrado com sucesso.\n", quantidadePedidos);
-                    printf("Novo saldo do lote: %d unidades.\n", saldosDosLotes[posicaoLote]);
-
-
-
-
-
-
-                 break;
+            case 9: {
+                int cliente, lote, quantidade;
+                char clienteTexto[16], loteTexto[16], quantidadeTexto[16], dataTexto[16];
+                if (!lerInteiro("Informe o codigo do cliente: ", &cliente) ||
+                    !lerInteiro("Informe o numero interno do lote: ", &lote)) break;
+                printf("Informe a data do pedido (DDMMAAAA): ");
+                int data = lerData();
+                if (data == 0) {
+                    puts("Data do pedido invalida.");
+                    break;
                 }
+                if (!lerInteiro("Informe a quantidade do pedido: ", &quantidade)) break;
+                snprintf(clienteTexto, sizeof clienteTexto, "%d", cliente);
+                snprintf(loteTexto, sizeof loteTexto, "%d", lote);
+                snprintf(quantidadeTexto, sizeof quantidadeTexto, "%d", quantidade);
+                snprintf(dataTexto, sizeof dataTexto, "%08d", data);
+                char *valores[] = {clienteTexto, loteTexto, quantidadeTexto, dataTexto};
+                // O procedimento grava o pedido e baixa o saldo na mesma transacao.
+                if (executarSQL("{CALL dbo.RegistrarPedido (?, ?, ?, ?)}",
+                                valores, 4, NULL, 0, NULL))
+                    puts("Pedido registrado no SQL Server. Consulte o novo saldo na opcao 6.");
+                break;
+            }
 
             case 10:
-                printf("Consulta de pedidos.\n\n");
-
-                if(quantidadePedidos == 0){
-                    printf("Nenhum pedido registrado");
-                    break;
-                }
-
-                for(int i = 0; i < quantidadePedidos; i++){
-                    //O primeiro pedido está na posição 0 e aparece como pedido 1.
-                    printf("Pedido: %d\n", i+1);
-
-                    //O mesmo índice i seleciona todos os dados do pedido.
-                    printf("Código do cliente: %d\n", clientesDosPedidos[i]);
-                    printf("Número interno do lote: %d\n", lotesDosPedidos[i]);
-                    printf("Quantidade: %d unidades\n", quantidadesDosPedidos[i]);
-                    printf("Data do pedido: ");
-                    mostrarData(datasDosPedidos[i]);
-                    printf("\n");
-                }
+                executarSQL(sqlPedidos, NULL, 0, pedidos, 6, NULL);
                 break;
 
-            case 11: {
-                if (quantidadePedidos == 0) {
-                    printf("Nenhum pedido para exportar.\n");
-                    break;
-                }
-
-                // Cria o arquivo ou substitui a exportacao anterior.
-                FILE *arquivo = fopen("pedidos.csv", "w");
-                if (arquivo == NULL) {
-                    printf("Não foi possível abrir pedidos.csv.\n");
-                    break;
-                }
-
-                int gravacaoOk = fprintf(
-                    arquivo, "Pedido;Código do cliente;Nome do cliente;Lote;Quantidade;Data\n"
-                ) >= 0;
-
-                for (int i = 0; i < quantidadePedidos && gravacaoOk; i++) {
-                    // O pedido guarda o codigo. A busca encontra o nome no cadastro.
-                    int codigoCliente = clientesDosPedidos[i];
-                    int posicaoCliente = buscarProduto(codigosClientes, quantidadeClientes, codigoCliente);
-
-                    if (posicaoCliente == -1) {
-                        gravacaoOk = 0;
-                        break;
-                    }
-
-                    // Campos entre aspas aceitam ponto e virgula no nome.
-                    // Uma aspa do nome precisa aparecer duas vezes no CSV.
-                    char nomeParaCsv[119];
-                    int destino = 0;
-
-                    for (int j = 0; nomesClientes[posicaoCliente][j] != '\0'; j++) {
-                        char letra = nomesClientes[posicaoCliente][j];
-
-                        if (letra == '"') {
-                            nomeParaCsv[destino++] = '"';
-                        }
-
-                        nomeParaCsv[destino++] = letra;
-                    }
-                    nomeParaCsv[destino] = '\0';
-
-                    // Converte AAAAMMDD para DD/MM/AAAA no arquivo.
-                    int data = datasDosPedidos[i];
-                    int ano = data / 10000;
-                    int mes = (data / 100) % 100;
-                    int dia = data % 100;
-
-                    gravacaoOk = fprintf(arquivo, "%d;%d;\"%s\";%d;%d;%02d/%02d/%04d\n",
-                                         i + 1, codigoCliente, nomeParaCsv,
-                                         lotesDosPedidos[i], quantidadesDosPedidos[i],
-                                         dia, mes, ano) >= 0;
-                }
-
-                if (fclose(arquivo) != 0) {
-                    gravacaoOk = 0;
-                }
-
-                if (gravacaoOk) {
-                    printf("Pedidos exportados para pedidos.csv.\n");
-                } else {
-                    printf("Erro ao gravar pedidos.csv.\n");
-                }
-
+            case 12: {
+                const char *teste[] = {"Conexao OK"};
+                executarSQL("SELECT 1", NULL, 0, teste, 1, NULL);
                 break;
             }
 
@@ -622,7 +366,7 @@ int main(void)
                 break;
 
             default:
-                printf("Opção inválida. Digite um número de 0 a 11.\n");
+                printf("Opção inválida. Digite um número de 0 a 12.\n");
                 break;
         }
     } while (opcao != 0);
